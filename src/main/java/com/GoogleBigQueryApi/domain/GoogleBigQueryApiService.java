@@ -3,6 +3,7 @@ package com.GoogleBigQueryApi.domain;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -12,11 +13,13 @@ import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.core5.http.ContentType;
+import org.apache.hc.core5.http.HttpStatus;
 import org.apache.hc.core5.http.ParseException;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.springframework.stereotype.Service;
 
+import com.GoogleBigQueryApi.constants.AppConstants;
 import com.GoogleBigQueryApi.constants.GoogleBigQueryURLs;
 import com.GoogleBigQueryApi.domain.entity.OauthCredentials;
 import com.GoogleBigQueryApi.exceptions.BusinessLogicException;
@@ -29,15 +32,30 @@ import com.google.gson.JsonParser;
 public class GoogleBigQueryApiService {
 	private static final String OAUTH_CREDENTIALS_FORMAT = "{ \"client_id\": \"%s\", \"client_secret\": \"%s\", \"refresh_token\": \"%s\", \"grant_type\": \"%s\", \"project_id\": \"%s\", \"dataset_id\": \"%s\" }";
 
+	public List<String> getAllProjectIds(OauthCredentials credentials)
+			throws BusinessLogicException, ParseException, IOException, InterruptedException {
+		String accessToken = this.getAccessToken(credentials);
+		List<String> projectIds = getProjectIds(accessToken);
+
+		return projectIds;
+	}
+
 	public List<Map<String, List<String>>> getAllTableNames(OauthCredentials credentials)
 			throws BusinessLogicException, ParseException, IOException, InterruptedException {
 		String accessToken = this.getAccessToken(credentials);
-		List<String> projectIds = getBigQueryProjectIds(accessToken);
+		List<String> projectIds = getProjectIds(accessToken);
 		List<Map<String, List<String>>> allTableNamesByDataSetId = new ArrayList<>();
 
 		for (String projectId : projectIds) {
-			allTableNamesByDataSetId.add(
-					getAllTableNamesAndDataSetNames(accessToken, projectId, getAllDataSetIds(accessToken, projectId)));
+			List<String> dataSetIds = getAllDataSetIds(accessToken, projectId);
+
+			if (dataSetIds == null || dataSetIds.isEmpty()) {
+				continue;
+			}
+
+			Map<String, List<String>> aableNamesByDataSetId = getAllTableNamesAndDataSetNames(accessToken, projectId,
+					dataSetIds);
+			allTableNamesByDataSetId.add(aableNamesByDataSetId);
 		}
 		return allTableNamesByDataSetId;
 	}
@@ -45,8 +63,10 @@ public class GoogleBigQueryApiService {
 	public List<String> getAllDataSetIds(OauthCredentials credentials)
 			throws ParseException, InterruptedException, IOException {
 		String accessToken = this.getAccessToken(credentials);
-		List<String> projectIds = getBigQueryProjectIds(accessToken);
+		List<String> projectIds = getProjectIds(accessToken);
 		List<String> dataSetIds = new ArrayList<>();
+		int retryDelay = 1000;
+		int attempt = 0;
 
 		for (String projectId : projectIds) {
 
@@ -60,7 +80,7 @@ public class GoogleBigQueryApiService {
 
 				int statusCode = response.getCode();
 
-				if (statusCode == 200) {
+				if (statusCode == HttpStatus.SC_OK) {
 					String responseString = EntityUtils.toString(response.getEntity());
 					JsonObject jsonObject = JsonParser.parseString(responseString).getAsJsonObject();
 
@@ -76,19 +96,27 @@ public class GoogleBigQueryApiService {
 					} else {
 						System.out.println("No datasets found.");
 					}
-
+				} else if (statusCode == HttpStatus.SC_TOO_MANY_REQUESTS && attempt < AppConstants.MAX_RETRY_COUNT) {
+					Thread.sleep(retryDelay);
+					retryDelay *= 2; // Exponential backoff
+					attempt++;
+				} else {
+					throw new BusinessLogicException("Failed to fetch files. HTTP Status: " + statusCode, statusCode);
 				}
-			} catch (IOException e) {
 
+			} catch (IOException e) {
+				throw new BusinessLogicException("Failed to get Data", e);
 			}
 		}
 
 		return dataSetIds;
 	}
 
-	public List<String> getAllDataSetIds(String accessToken, String projectId) throws ParseException {
+	public List<String> getAllDataSetIds(String accessToken, String projectId)
+			throws ParseException, InterruptedException {
 		List<String> dataSetIds = new ArrayList<>();
-
+		int retryDelay = 1000;
+		int attempt = 0;
 		String getDataSetURL = String.format(GoogleBigQueryURLs.BIGQUERY_DATASETS_URL, projectId);
 
 		final HttpGet request = new HttpGet(getDataSetURL);
@@ -99,7 +127,7 @@ public class GoogleBigQueryApiService {
 
 			int statusCode = response.getCode();
 
-			if (statusCode == 200) {
+			if (statusCode == HttpStatus.SC_OK) {
 				String responseString = EntityUtils.toString(response.getEntity());
 				JsonObject jsonObject = JsonParser.parseString(responseString).getAsJsonObject();
 
@@ -116,19 +144,27 @@ public class GoogleBigQueryApiService {
 					System.out.println("No datasets found.");
 				}
 
+			} else if (statusCode == HttpStatus.SC_TOO_MANY_REQUESTS && attempt < AppConstants.MAX_RETRY_COUNT) {
+				Thread.sleep(retryDelay);
+				retryDelay *= 2; // Exponential backoff
+				attempt++;
+			} else {
+				throw new BusinessLogicException("Failed to fetch files. HTTP Status: " + statusCode, statusCode);
 			}
 		} catch (IOException e) {
-
+			throw new BusinessLogicException("Failed to get Data", e);
 		}
 
 		return dataSetIds;
 	}
 
 	public Map<String, List<String>> getAllTableNamesAndDataSetNames(String accessToken, String projectId,
-			List<String> dataSetIds) throws ParseException {
+			List<String> dataSetIds) throws ParseException, InterruptedException {
 		Map<String, List<String>> dataSetIdAndtableIds = new HashMap<>();
+		int retryDelay = 1000;
+		int attempt = 0;
 
-		if (!dataSetIds.isEmpty()) {
+		if (dataSetIds != null && !dataSetIds.isEmpty()) {
 
 			for (String dataSetId : dataSetIds) {
 				String getDataSetURL = String.format(GoogleBigQueryURLs.BIGQUERY_TABLE_NAME_URL, projectId, dataSetId);
@@ -141,7 +177,7 @@ public class GoogleBigQueryApiService {
 
 					int statusCode = response.getCode();
 
-					if (statusCode == 200) {
+					if (statusCode == HttpStatus.SC_OK) {
 						String responseString = EntityUtils.toString(response.getEntity());
 						JsonObject jsonObject = JsonParser.parseString(responseString).getAsJsonObject();
 
@@ -160,13 +196,20 @@ public class GoogleBigQueryApiService {
 							System.out.println("No datasets found.");
 						}
 
+					} else if (statusCode == HttpStatus.SC_TOO_MANY_REQUESTS
+							&& attempt < AppConstants.MAX_RETRY_COUNT) {
+						Thread.sleep(retryDelay);
+						retryDelay *= 2; // Exponential backoff
+						attempt++;
+					} else {
+						throw new BusinessLogicException("Failed to fetch files. HTTP Status: " + statusCode,
+								statusCode);
 					}
 				} catch (IOException e) {
-
+					throw new BusinessLogicException("Failed to get Data", e);
 				}
 			}
 		}
-
 		return dataSetIdAndtableIds;
 	}
 
@@ -191,10 +234,8 @@ public class GoogleBigQueryApiService {
 		}
 	}
 
-	public List<String> getBigQueryProjectIds(String accessToken)
-			throws ParseException, InterruptedException, IOException {
+	public List<String> getProjectIds(String accessToken) throws ParseException, InterruptedException, IOException {
 		List<String> projectIds = new ArrayList<>();
-		int maxRetries = 3;
 		int retryDelay = 1000;
 		int attempt = 0;
 
@@ -206,7 +247,7 @@ public class GoogleBigQueryApiService {
 
 			int statusCode = response.getCode();
 
-			if (statusCode == 200) {
+			if (statusCode == HttpStatus.SC_OK) {
 				String responseString = EntityUtils.toString(response.getEntity());
 				JsonObject jsonObject = JsonParser.parseString(responseString).getAsJsonObject();
 
@@ -218,23 +259,109 @@ public class GoogleBigQueryApiService {
 					String tableId = tableReference.get("projectId").getAsString();
 					projectIds.add(tableId);
 				}
-			} else if (statusCode == 429 && attempt < maxRetries) {
-				System.out.println("Rate limit exceeded. Retrying in " + retryDelay + "ms...");
+			} else if (statusCode == HttpStatus.SC_TOO_MANY_REQUESTS && attempt < AppConstants.MAX_RETRY_COUNT) {
 				Thread.sleep(retryDelay);
 				retryDelay *= 2; // Exponential backoff
 				attempt++;
 			} else {
-				throw new BusinessLogicException("Failed to fetch files. HTTP Status: " + statusCode, statusCode);
+				throw new BusinessLogicException("Failed to fetch ProjectIds. HTTP Status: " + statusCode, statusCode);
 			}
+		} catch (Exception e) {
+			throw new BusinessLogicException("Failed to get ProjectIds", e);
 
-		} catch (IOException e) {
-			if (attempt == maxRetries)
-				throw e; // Rethrow if retries exhausted
-			System.out.println("IO error occurred. Retrying in " + retryDelay + "ms...");
-			Thread.sleep(retryDelay);
-			retryDelay *= 2;
 		}
 		return projectIds;
 	}
 
+	public List<String> columnNames(OauthCredentials credentials, String projectId, String dataSetId, String tableName)
+			throws ParseException, InterruptedException, IOException {
+		List<String> columnName = new ArrayList<>();
+
+		String accessToken = this.getAccessToken(credentials);
+		int retryDelay = 1000;
+		int attempt = 0;
+
+		String getColumnNameURL = String.format(GoogleBigQueryURLs.BIGQUERY_COLUMN_NAME_URL, projectId, dataSetId,
+				tableName);
+
+		final HttpGet request = new HttpGet(getColumnNameURL);
+		request.setHeader("Authorization", "Bearer " + accessToken);
+
+		try (CloseableHttpClient httpClient = HttpClients.createDefault();
+				CloseableHttpResponse response = httpClient.execute(request)) {
+
+			int statusCode = response.getCode();
+
+			if (statusCode == HttpStatus.SC_OK) {
+				String responseString = EntityUtils.toString(response.getEntity());
+				JsonObject jsonObject = JsonParser.parseString(responseString).getAsJsonObject();
+
+				JsonArray fieldsArray = jsonObject.getAsJsonObject("schema").getAsJsonArray("fields");
+
+				for (JsonElement fieldElement : fieldsArray) {
+					JsonObject fieldObj = fieldElement.getAsJsonObject();
+					columnName.add(fieldObj.get("name").getAsString());
+				}
+
+			} else if (statusCode == HttpStatus.SC_TOO_MANY_REQUESTS && attempt < AppConstants.MAX_RETRY_COUNT) {
+				Thread.sleep(retryDelay);
+				retryDelay *= 2; // Exponential backoff
+				attempt++;
+			} else {
+				throw new BusinessLogicException("Failed to fetch ColunmName. HTTP Status: " + statusCode, statusCode);
+			}
+
+		} catch (Exception e) {
+			throw new BusinessLogicException("Failed to get ColunmName", e);
+		}
+
+		return columnName;
+	}
+
+	public List<Map<String, String>> columnNamesAndValues(OauthCredentials credentials, String projectId,
+			String dataSetId, String tableName) throws ParseException, InterruptedException, IOException {
+		List<String> columnName = new ArrayList<>();
+		List<Map<String, String>> resultRows = new ArrayList<>();
+
+		String accessToken = this.getAccessToken(credentials);
+		int retryDelay = 1000;
+		int attempt = 0;
+
+		columnName = columnNames(credentials, projectId, dataSetId, tableName);
+
+		String dataUrl = String.format(GoogleBigQueryURLs.BIGQUERY_TABLE_DATA_URL, projectId, dataSetId, tableName);
+		HttpGet dataRequest = new HttpGet(dataUrl);
+		dataRequest.setHeader("Authorization", "Bearer " + accessToken);
+
+		try (CloseableHttpClient httpClient = HttpClients.createDefault();
+				CloseableHttpResponse response = httpClient.execute(dataRequest)) {
+			int statusCode = response.getCode();
+			if (statusCode == HttpStatus.SC_OK) {
+				String dataJson = EntityUtils.toString(response.getEntity());
+				JsonObject dataObject = JsonParser.parseString(dataJson).getAsJsonObject();
+				JsonArray rows = dataObject.getAsJsonArray("rows");
+
+				if (rows != null) {
+					for (JsonElement rowElement : rows) {
+						JsonArray values = rowElement.getAsJsonObject().getAsJsonArray("f");
+						Map<String, String> rowMap = new LinkedHashMap<>();
+						for (int i = 0; i < columnName.size(); i++) {
+							String value = values.get(i).getAsJsonObject().get("v").getAsString();
+							rowMap.put(columnName.get(i), value);
+						}
+						resultRows.add(rowMap);
+					}
+				}
+			} else if (statusCode == HttpStatus.SC_TOO_MANY_REQUESTS && attempt < AppConstants.MAX_RETRY_COUNT) {
+				Thread.sleep(retryDelay);
+				retryDelay *= 2; // Exponential backoff
+				attempt++;
+			} else {
+				throw new BusinessLogicException("Failed to fetch Data. HTTP Status: " + statusCode, statusCode);
+			}
+		} catch (Exception e) {
+			throw new BusinessLogicException("Failed to get Data", e);
+		}
+		return resultRows;
+	}
 }
